@@ -3,7 +3,7 @@ use std::os::unix::prelude::PermissionsExt;
 use std::{
     collections::BTreeMap,
     env,
-    fs::{self, File, Permissions},
+    fs::{self, File},
     io::{Cursor, Write},
     mem,
     path::{Path, PathBuf},
@@ -13,7 +13,10 @@ use std::{
 };
 
 use eframe::{
-    egui::{Button, CentralPanel, ComboBox, Context, Frame, Grid, Layout, ProgressBar, Window},
+    egui::{
+        Button, CentralPanel, ComboBox, Context, Frame, Grid, Layout, ProgressBar, ViewportCommand,
+        Window,
+    },
     emath::{Align, Align2},
     epaint::Color32,
 };
@@ -423,7 +426,7 @@ impl Launcher {
 }
 
 impl eframe::App for Launcher {
-    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 WorkerMsg::VersionData(data) => self.version_data = Some(data),
@@ -470,7 +473,7 @@ impl eframe::App for Launcher {
                                                     }
                                                 }
                                                 self.tx.send(GuiMsg::Quit).unwrap();
-                                                frame.close();
+                                                ctx.send_viewport_cmd(ViewportCommand::Close);
                                             }
                                             if ui
                                                 .add_enabled(
@@ -548,11 +551,10 @@ impl eframe::App for Launcher {
                 });
             }
         });
-    }
 
-    fn on_close_event(&mut self) -> bool {
-        self.tx.send(GuiMsg::Quit).unwrap();
-        true
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.tx.send(GuiMsg::Quit).unwrap();
+        }
     }
 }
 
@@ -756,7 +758,7 @@ async fn install(
 
     let buffer = download(tx, "Downloading Streamer", &url, client).await?;
 
-    let mut installation_dir = data_dir().extended(VERSIONS_SUBDIR).extended(&release.tag);
+    let installation_dir = data_dir().extended(VERSIONS_SUBDIR).extended(&release.tag);
 
     fs::create_dir_all(&installation_dir)?;
 
