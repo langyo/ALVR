@@ -1,10 +1,10 @@
-use alvr_client_core::{ClientCapabilities, ClientCoreEvent};
+use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
     glam::{Quat, UVec2, Vec3},
     parking_lot::RwLock,
-    DeviceMotion, Pose, RelaxedAtomic, HEAD_ID,
+    DeviceMotion, Fov, Pose, RelaxedAtomic, HEAD_ID,
 };
-use alvr_packets::Tracking;
+use alvr_packets::{FaceData, ViewParams};
 use alvr_session::CodecType;
 use eframe::{
     egui::{CentralPanel, Context, RichText, Slider, ViewportBuilder},
@@ -25,9 +25,7 @@ struct WindowInput {
     height: f32,
     yaw: f32,
     pitch: f32,
-    use_random_position: bool,
-    random_position_offset_magnitude: f32,
-    random_position_interval_ms: u64,
+    use_random_orientation: bool,
     emulated_decode_ms: u64,
     emulated_compositor_ms: u64,
     emulated_vsync_ms: u64,
@@ -39,9 +37,7 @@ impl Default for WindowInput {
             height: 1.5,
             yaw: 0.0,
             pitch: 0.0,
-            use_random_position: true,
-            random_position_offset_magnitude: 0.01,
-            random_position_interval_ms: 2000,
+            use_random_orientation: true,
             emulated_decode_ms: 5,
             emulated_compositor_ms: 1,
             emulated_vsync_ms: 25,
@@ -52,8 +48,8 @@ impl Default for WindowInput {
 #[derive(Clone)]
 struct WindowOutput {
     hud_message: String,
-    fps: f32,
     connected: bool,
+    fps: f32,
     resolution: UVec2,
     decoder_codec: Option<CodecType>,
     current_frame_timestamp: Duration,
@@ -63,8 +59,8 @@ impl Default for WindowOutput {
     fn default() -> Self {
         Self {
             hud_message: "".into(),
-            fps: 60.0,
             connected: false,
+            fps: 1.0,
             resolution: UVec2::ZERO,
             decoder_codec: None,
             current_frame_timestamp: Duration::ZERO,
@@ -105,8 +101,8 @@ impl eframe::App for Window {
             ui.vertical_centered(|ui| {
                 ui.heading(RichText::new(&self.output.hud_message));
             });
-            ui.label(format!("FPS: {}", self.output.fps));
             ui.label(format!("Connected: {}", self.output.connected));
+            ui.label(format!("FPS: {}", self.output.fps));
             ui.label(format!("View resolution: {}", self.output.resolution));
             ui.label(format!("Codec: {:?}", self.output.decoder_codec));
             ui.label(format!(
@@ -126,21 +122,10 @@ impl eframe::App for Window {
                 ui.label("Pitch:");
                 ui.add(Slider::new(&mut input.pitch, -FRAC_PI_2..=FRAC_PI_2));
             });
-            ui.checkbox(&mut input.use_random_position, "Use random position");
-            ui.horizontal(|ui| {
-                ui.label("Random position offset magnitude:");
-                ui.add(Slider::new(
-                    &mut input.random_position_offset_magnitude,
-                    0.0..=0.1,
-                ));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Random position interval ms");
-                ui.add(Slider::new(
-                    &mut input.random_position_interval_ms,
-                    0..=10_000,
-                ));
-            });
+            ui.checkbox(
+                &mut input.use_random_orientation,
+                "Use randomized orientation offset",
+            );
         });
 
         if input != self.input {
@@ -153,34 +138,41 @@ impl eframe::App for Window {
     }
 }
 
-fn tracking_thread(streaming: Arc<RelaxedAtomic>, fps: f32, input: Arc<RwLock<WindowInput>>) {
+fn tracking_thread(
+    context: Arc<ClientCoreContext>,
+    streaming: Arc<RelaxedAtomic>,
+    fps: f32,
+    input: Arc<RwLock<WindowInput>>,
+) {
     let timestamp_origin = Instant::now();
 
-    let mut position_offset = Vec3::ZERO;
+    let views_params = ViewParams {
+        pose: Pose::default(),
+        fov: Fov {
+            left: -1.0,
+            right: 1.0,
+            up: 1.0,
+            down: -1.0,
+        },
+    };
+    context.send_view_params([views_params, views_params]);
 
     let mut loop_deadline = Instant::now();
-    let mut random_position_deadline = Instant::now();
     while streaming.value() {
         let input_lock = input.read();
 
-        let orientation =
+        let mut orientation =
             Quat::from_rotation_y(input_lock.yaw) * Quat::from_rotation_x(input_lock.pitch);
 
-        if input_lock.use_random_position && Instant::now() > random_position_deadline {
-            random_position_deadline =
-                Instant::now() + Duration::from_millis(input_lock.random_position_interval_ms);
-
-            position_offset = (Vec3::new(rand::random(), rand::random(), rand::random())
-                - Vec3::ONE / 0.5)
-                * input_lock.random_position_offset_magnitude;
+        if input_lock.use_random_orientation {
+            orientation *= Quat::from_rotation_z(rand::random::<f32>() * 0.001);
         }
 
-        let position = Vec3::new(0.0, input_lock.height, 0.0) + position_offset;
+        let position = Vec3::new(0.0, input_lock.height, 0.0);
 
-        alvr_client_core::send_tracking(Tracking {
-            target_timestamp: Instant::now() - timestamp_origin
-                + alvr_client_core::get_head_prediction_offset(),
-            device_motions: vec![(
+        context.send_tracking(
+            Instant::now() - timestamp_origin,
+            vec![(
                 *HEAD_ID,
                 DeviceMotion {
                     pose: Pose {
@@ -191,8 +183,14 @@ fn tracking_thread(streaming: Arc<RelaxedAtomic>, fps: f32, input: Arc<RwLock<Wi
                     angular_velocity: Vec3::ZERO,
                 },
             )],
-            ..Default::default()
-        });
+            [None, None],
+            FaceData {
+                eye_gazes: [None, None],
+                fb_face_expression: None,
+                htc_eye_expression: None,
+                htc_lip_expression: None,
+            },
+        );
 
         drop(input_lock);
 
@@ -205,18 +203,24 @@ fn client_thread(
     output_sender: mpsc::Sender<WindowOutput>,
     input_receiver: mpsc::Receiver<WindowInput>,
 ) {
-    alvr_client_core::initialize(ClientCapabilities {
+    let capabilities = ClientCapabilities {
         default_view_resolution: UVec2::new(1920, 1832),
-        external_decoder: true,
         refresh_rates: vec![60.0, 72.0, 80.0, 90.0, 120.0],
         foveated_encoding: false,
         encoder_high_profile: false,
         encoder_10_bits: false,
         encoder_av1: false,
-    });
-    alvr_client_core::resume();
+        prefer_10bit: false,
+        prefer_full_range: true,
+        preferred_encoding_gamma: 1.0,
+        prefer_hdr: false,
+    };
+    let client_core_context = Arc::new(ClientCoreContext::new(capabilities));
 
-    let streaming = Arc::new(RelaxedAtomic::new(true));
+    client_core_context.resume();
+
+    let streaming = Arc::new(RelaxedAtomic::new(false));
+    let got_decoder_config = Arc::new(RelaxedAtomic::new(false));
     let mut maybe_tracking_thread = None;
 
     let mut window_output = WindowOutput::default();
@@ -226,39 +230,48 @@ fn client_thread(
     'main_loop: loop {
         let input_lock = window_input.read();
 
-        while let Some(event) = alvr_client_core::poll_event() {
+        while let Some(event) = client_core_context.poll_event() {
             match event {
                 ClientCoreEvent::UpdateHudMessage(message) => {
                     window_output.hud_message = message;
                 }
-                ClientCoreEvent::StreamingStarted {
-                    negotiated_config, ..
-                } => {
-                    window_output.fps = negotiated_config.refresh_rate_hint;
+                ClientCoreEvent::StreamingStarted(config) => {
+                    window_output.fps = config.negotiated_config.refresh_rate_hint;
                     window_output.connected = true;
-                    window_output.resolution = negotiated_config.view_resolution;
+                    window_output.resolution = config.negotiated_config.view_resolution;
 
+                    streaming.set(true);
+
+                    let context = Arc::clone(&client_core_context);
                     let streaming = Arc::clone(&streaming);
                     let input = Arc::clone(&window_input);
                     maybe_tracking_thread = Some(thread::spawn(move || {
-                        tracking_thread(streaming, negotiated_config.refresh_rate_hint, input)
+                        tracking_thread(
+                            context,
+                            streaming,
+                            config.negotiated_config.refresh_rate_hint,
+                            input,
+                        )
                     }));
                 }
                 ClientCoreEvent::StreamingStopped => {
-                    window_output.connected = true;
+                    streaming.set(false);
+                    got_decoder_config.set(false);
+
                     if let Some(thread) = maybe_tracking_thread.take() {
                         thread.join().ok();
                     }
+
+                    window_output.fps = 1.0;
+                    window_output.connected = false;
+                    window_output.resolution = UVec2::ZERO;
+                    window_output.decoder_codec = None;
                 }
                 ClientCoreEvent::Haptics { .. } => (),
                 ClientCoreEvent::DecoderConfig { codec, .. } => {
-                    window_output.decoder_codec = Some(codec)
-                }
-                ClientCoreEvent::FrameReady { timestamp, .. } => {
-                    window_output.current_frame_timestamp = timestamp;
+                    got_decoder_config.set(true);
 
-                    thread::sleep(Duration::from_millis(input_lock.emulated_decode_ms));
-                    alvr_client_core::report_frame_decoded(timestamp);
+                    window_output.decoder_codec = Some(codec);
                 }
             }
 
@@ -267,11 +280,11 @@ fn client_thread(
 
         thread::sleep(Duration::from_millis(3));
 
-        alvr_client_core::report_compositor_start(window_output.current_frame_timestamp);
+        client_core_context.report_compositor_start(window_output.current_frame_timestamp);
 
         thread::sleep(Duration::from_millis(input_lock.emulated_compositor_ms));
 
-        alvr_client_core::report_submit(
+        client_core_context.report_submit(
             window_output.current_frame_timestamp,
             Duration::from_millis(input_lock.emulated_vsync_ms),
         );
@@ -293,8 +306,9 @@ fn client_thread(
         thread.join().unwrap();
     }
 
-    alvr_client_core::pause();
-    alvr_client_core::destroy();
+    client_core_context.pause()
+
+    // client_core_context destroy is called here on drop
 }
 
 fn main() {
@@ -313,7 +327,7 @@ fn main() {
             viewport: ViewportBuilder::default().with_inner_size((400.0, 400.0)),
             ..Default::default()
         },
-        Box::new(|_| Box::new(Window::new(input_sender, output_receiver))),
+        Box::new(|_| Ok(Box::new(Window::new(input_sender, output_receiver)))),
     )
     .ok();
 

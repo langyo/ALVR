@@ -1,12 +1,14 @@
 use alvr_common::{
     anyhow::Result,
     glam::{UVec2, Vec2},
+    semver::Version,
     ConnectionState, DeviceMotion, Fov, LogEntry, LogSeverity, Pose, ToAny,
 };
 use alvr_session::{CodecType, SessionConfig, Settings};
 use serde::{Deserialize, Serialize};
 use serde_json as json;
 use std::{
+    collections::HashSet,
     fmt::{self, Debug},
     net::IpAddr,
     path::PathBuf,
@@ -37,6 +39,11 @@ pub struct VideoStreamingCapabilities {
     pub encoder_high_profile: bool,
     pub encoder_10_bits: bool,
     pub encoder_av1: bool,
+    pub multimodal_protocol: bool,
+    pub prefer_10bit: bool,
+    pub prefer_full_range: bool,
+    pub preferred_encoding_gamma: f32,
+    pub prefer_hdr: bool,
 }
 
 // Nasty workaround to make the packet extensible, pushing the limits of protocol compatibility
@@ -78,7 +85,8 @@ pub fn decode_video_streaming_capabilities(
         }
     }
 
-    let caps_json = json::from_str::<json::Value>(&String::from_utf8(json_bytes)?)?;
+    let caps_json =
+        json::from_str::<json::Value>(&String::from_utf8(json_bytes)?).unwrap_or(json::Value::Null);
 
     Ok(VideoStreamingCapabilities {
         default_view_resolution: legacy.default_view_resolution,
@@ -90,6 +98,13 @@ pub fn decode_video_streaming_capabilities(
         encoder_high_profile: caps_json["encoder_high_profile"].as_bool().unwrap_or(true),
         encoder_10_bits: caps_json["encoder_10_bits"].as_bool().unwrap_or(true),
         encoder_av1: caps_json["encoder_av1"].as_bool().unwrap_or(true),
+        multimodal_protocol: caps_json["multimodal_protocol"].as_bool().unwrap_or(false),
+        prefer_10bit: caps_json["prefer_10bit"].as_bool().unwrap_or(false),
+        prefer_full_range: caps_json["prefer_full_range"].as_bool().unwrap_or(true),
+        preferred_encoding_gamma: caps_json["preferred_encoding_gamma"]
+            .as_f64()
+            .unwrap_or(1.0) as f32,
+        prefer_hdr: caps_json["prefer_hdr"].as_bool().unwrap_or(false),
     })
 }
 
@@ -111,6 +126,13 @@ pub struct NegotiatedStreamingConfig {
     pub refresh_rate_hint: f32,
     pub game_audio_sample_rate: u32,
     pub enable_foveated_encoding: bool,
+    // This is needed to detect when to use SteamVR hand trackers. This does NOT imply if multimodal
+    // input is supported
+    pub use_multimodal_protocol: bool,
+    pub use_full_range: bool,
+    pub encoding_gamma: f32,
+    pub enable_hdr: bool,
+    pub wired: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,9 +151,14 @@ pub fn encode_stream_config(
     })
 }
 
-pub fn decode_stream_config(
-    packet: &StreamConfigPacket,
-) -> Result<(Settings, NegotiatedStreamingConfig)> {
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StreamConfig {
+    pub server_version: Version,
+    pub settings: Settings,
+    pub negotiated_config: NegotiatedStreamingConfig,
+}
+
+pub fn decode_stream_config(packet: &StreamConfigPacket) -> Result<StreamConfig> {
     let mut session_config = SessionConfig::default();
     session_config.merge_from_json(&json::from_str(&packet.session)?)?;
     let settings = session_config.to_settings();
@@ -145,16 +172,29 @@ pub fn decode_stream_config(
     let enable_foveated_encoding =
         json::from_value(negotiated_json["enable_foveated_encoding"].clone())
             .unwrap_or_else(|_| settings.video.foveated_encoding.enabled());
+    let use_multimodal_protocol =
+        json::from_value(negotiated_json["use_multimodal_protocol"].clone()).unwrap_or(false);
+    let use_full_range = json::from_value(negotiated_json["use_full_range"].clone())
+        .unwrap_or(settings.video.encoder_config.use_full_range);
+    let encoding_gamma = json::from_value(negotiated_json["encoding_gamma"].clone()).unwrap_or(1.0);
+    let enable_hdr = json::from_value(negotiated_json["enable_hdr"].clone()).unwrap_or(false);
+    let wired = json::from_value(negotiated_json["wired"].clone())?;
 
-    Ok((
+    Ok(StreamConfig {
+        server_version: session_config.server_version,
         settings,
-        NegotiatedStreamingConfig {
+        negotiated_config: NegotiatedStreamingConfig {
             view_resolution,
             refresh_rate_hint,
             game_audio_sample_rate,
             enable_foveated_encoding,
+            use_multimodal_protocol,
+            use_full_range,
+            encoding_gamma,
+            enable_hdr,
+            wired,
         },
-    ))
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -182,7 +222,7 @@ pub struct ViewsConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct BatteryPacket {
+pub struct BatteryInfo {
     pub device_id: u64,
     pub gauge_value: f32, // range [0, 1]
     pub is_plugged: bool,
@@ -200,6 +240,21 @@ pub struct ButtonEntry {
     pub value: ButtonValue,
 }
 
+// to be de/serialized with ClientControlPacket::Reserved()
+#[derive(Serialize, Deserialize)]
+pub enum ReservedClientControlPacket {
+    CustomInteractionProfile {
+        device_id: u64,
+        input_ids: HashSet<u64>,
+    },
+}
+
+pub fn encode_reserved_client_control_packet(
+    packet: &ReservedClientControlPacket,
+) -> ClientControlPacket {
+    ClientControlPacket::Reserved(json::to_string(packet).unwrap())
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum ClientControlPacket {
     PlayspaceSync(Option<Vec2>),
@@ -207,7 +262,7 @@ pub enum ClientControlPacket {
     KeepAlive,
     StreamReady, // This flag notifies the server the client streaming socket is ready listening
     ViewsConfig(ViewsConfig),
-    Battery(BatteryPacket),
+    Battery(BatteryInfo),
     VideoErrorReport, // legacy
     Buttons(Vec<ButtonEntry>),
     ActiveInteractionProfile { device_id: u64, profile_id: u64 },
@@ -216,7 +271,7 @@ pub enum ClientControlPacket {
     ReservedBuffer(Vec<u8>),
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
     pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
@@ -349,4 +404,12 @@ pub enum ServerRequest {
     GetDriverList,
     RestartSteamvr,
     ShutdownSteamvr,
+}
+
+// Per eye view parameters
+// todo: send together with video frame
+#[derive(Serialize, Deserialize, Clone, Copy, Default)]
+pub struct ViewParams {
+    pub pose: Pose,
+    pub fov: Fov,
 }

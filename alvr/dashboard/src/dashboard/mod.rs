@@ -1,8 +1,7 @@
-mod basic_components;
 mod components;
 
 use self::components::{
-    ConnectionsTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
+    DevicesTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
 };
 use crate::{dashboard::components::StatisticsTab, DataSources};
 use alvr_common::parking_lot::{Condvar, Mutex};
@@ -10,44 +9,12 @@ use alvr_events::EventType;
 use alvr_gui_common::theme;
 use alvr_packets::{PathValuePair, ServerRequest};
 use alvr_session::SessionConfig;
-use eframe::egui::{
-    self, style::Margin, Align, CentralPanel, Frame, Layout, RichText, SidePanel, Stroke,
-};
-use std::{
-    collections::BTreeMap,
-    ops::Deref,
-    sync::{atomic::AtomicUsize, Arc},
-};
-
-#[derive(Clone)]
-pub struct DisplayString {
-    pub id: String,
-    pub display: String,
-}
-
-impl From<(String, String)> for DisplayString {
-    fn from((id, display): (String, String)) -> Self {
-        Self { id, display }
-    }
-}
-
-impl Deref for DisplayString {
-    type Target = String;
-
-    fn deref(&self) -> &String {
-        &self.id
-    }
-}
-
-fn get_id() -> usize {
-    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
+use eframe::egui::{self, Align, CentralPanel, Frame, Layout, Margin, RichText, SidePanel, Stroke};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Tab {
-    Connections,
+    Devices,
     Statistics,
     Settings,
     #[cfg(not(target_arch = "wasm32"))]
@@ -64,7 +31,7 @@ pub struct Dashboard {
     server_restarting_condvar: Arc<Condvar>,
     selected_tab: Tab,
     tab_labels: BTreeMap<Tab, &'static str>,
-    connections_tab: ConnectionsTab,
+    connections_tab: DevicesTab,
     statistics_tab: StatisticsTab,
     settings_tab: SettingsTab,
     #[cfg(not(target_arch = "wasm32"))]
@@ -89,9 +56,9 @@ impl Dashboard {
             just_opened: true,
             server_restarting: Arc::new(Mutex::new(false)),
             server_restarting_condvar: Arc::new(Condvar::new()),
-            selected_tab: Tab::Connections,
+            selected_tab: Tab::Devices,
             tab_labels: [
-                (Tab::Connections, "🔌  Connections"),
+                (Tab::Devices, "🔌  Devices"),
                 (Tab::Statistics, "📈  Statistics"),
                 (Tab::Settings, "⚙  Settings"),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -102,7 +69,7 @@ impl Dashboard {
             ]
             .into_iter()
             .collect(),
-            connections_tab: ConnectionsTab::new(),
+            connections_tab: DevicesTab::new(),
             statistics_tab: StatisticsTab::new(),
             settings_tab: SettingsTab::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -170,7 +137,7 @@ impl eframe::App for Dashboard {
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
                     if self.just_opened {
-                        if settings.open_setup_wizard {
+                        if settings.extra.open_setup_wizard {
                             self.setup_wizard_open = true;
                         }
 
@@ -183,6 +150,9 @@ impl eframe::App for Dashboard {
                 EventType::AudioDevices(list) => self.settings_tab.update_audio_devices(list),
                 #[cfg(not(target_arch = "wasm32"))]
                 EventType::DriversList(list) => self.installation_tab.update_drivers(list),
+                EventType::Adb(adb_event) => self
+                    .connections_tab
+                    .update_adb_download_progress(adb_event.download_progress),
                 _ => (),
             }
         }
@@ -212,7 +182,7 @@ impl eframe::App for Dashboard {
                             if finished {
                                 requests.push(ServerRequest::SetValues(vec![PathValuePair {
                                     path: alvr_packets::parse_path(
-                                        "session_settings.open_setup_wizard",
+                                        "session_settings.extra.open_setup_wizard",
                                     ),
                                     value: serde_json::Value::Bool(false),
                                 }]))
@@ -232,7 +202,7 @@ impl eframe::App for Dashboard {
                         .inner_margin(Margin::same(7.0))
                         .stroke(Stroke::new(1.0, theme::SEPARATOR_BG)),
                 )
-                .exact_width(150.0)
+                .exact_width(160.0)
                 .show(context, |ui| {
                     ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                         ui.add_space(13.0);
@@ -290,12 +260,9 @@ impl eframe::App for Dashboard {
                 )
                 .show(context, |ui| {
                     ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
-                        ui.heading(
-                            RichText::new(*self.tab_labels.get(&self.selected_tab).unwrap())
-                                .size(25.0),
-                        );
+                        ui.heading(RichText::new(self.tab_labels[&self.selected_tab]).size(25.0));
                         match self.selected_tab {
-                            Tab::Connections => {
+                            Tab::Devices => {
                                 requests.extend(self.connections_tab.ui(ui, connected_to_server));
                             }
                             Tab::Statistics => {
@@ -343,6 +310,7 @@ impl eframe::App for Dashboard {
                 .as_ref()
                 .map(|s| {
                     s.to_settings()
+                        .extra
                         .steamvr_launcher
                         .open_close_steamvr_with_dashboard
                 })
