@@ -44,6 +44,8 @@ devices! {
     (HEAD, "/user/head"),
     (HAND_LEFT, "/user/hand/left"),
     (HAND_RIGHT, "/user/hand/right"),
+    (HAND_TRACKER_LEFT,"/user/hand_tracker/left"),
+    (HAND_TRACKER_RIGHT, "/user/hand_tracker/right"),
     (BODY_CHEST, "/user/body/chest"),
     (BODY_HIPS, "/user/body/waist"),
     (BODY_LEFT_ELBOW, "/user/body/left_elbow"),
@@ -52,6 +54,8 @@ devices! {
     (BODY_LEFT_FOOT, "/user/body/left_foot"),
     (BODY_RIGHT_KNEE, "/user/body/right_knee"),
     (BODY_RIGHT_FOOT, "/user/body/right_foot"),
+    (DETACHED_CONTROLLER_LEFT, "/user/detached_controller_meta/left"),
+    (DETACHED_CONTROLLER_RIGHT, "/user/detached_controller_meta/right"),
 }
 
 pub enum ButtonType {

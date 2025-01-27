@@ -1,7 +1,13 @@
-use crate::command;
+use crate::{command, BuildPlatform};
 use alvr_filesystem as afs;
 use std::{fs, path::Path};
 use xshell::{cmd, Shell};
+
+pub enum OpenXRLoadersSelection {
+    OnlyGeneric,
+    OnlyPico,
+    All,
+}
 
 pub fn choco_install(sh: &Shell, packages: &[&str]) -> Result<(), xshell::Error> {
     cmd!(
@@ -78,14 +84,7 @@ pub fn prepare_windows_deps(skip_admin_priv: bool) {
     if !skip_admin_priv {
         choco_install(
             &sh,
-            &[
-                "zip",
-                "unzip",
-                "llvm",
-                "vulkan-sdk",
-                "wixtoolset",
-                "pkgconfiglite",
-            ],
+            &["zip", "unzip", "llvm", "vulkan-sdk", "pkgconfiglite"],
         )
         .unwrap();
     }
@@ -94,7 +93,7 @@ pub fn prepare_windows_deps(skip_admin_priv: bool) {
     prepare_ffmpeg_windows(&deps_path);
 }
 
-pub fn prepare_linux_deps(nvenc_flag: bool) {
+pub fn prepare_linux_deps(enable_nvenc: bool) {
     let sh = Shell::new().unwrap();
 
     let deps_path = afs::deps_dir().join("linux");
@@ -102,7 +101,7 @@ pub fn prepare_linux_deps(nvenc_flag: bool) {
     sh.create_dir(&deps_path).unwrap();
 
     build_x264_linux(&deps_path);
-    build_ffmpeg_linux(nvenc_flag, &deps_path);
+    build_ffmpeg_linux(enable_nvenc, &deps_path);
 }
 
 pub fn build_x264_linux(deps_path: &Path) {
@@ -138,7 +137,7 @@ pub fn build_x264_linux(deps_path: &Path) {
     cmd!(sh, "make install").run().unwrap();
 }
 
-pub fn build_ffmpeg_linux(nvenc_flag: bool, deps_path: &Path) {
+pub fn build_ffmpeg_linux(enable_nvenc: bool, deps_path: &Path) {
     let sh = Shell::new().unwrap();
 
     command::download_and_extract_zip(
@@ -190,7 +189,7 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool, deps_path: &Path) {
     let ffmpeg_command = "for p in ../../../alvr/xtask/patches/*; do patch -p1 < $p; done";
     cmd!(sh, "bash -c {ffmpeg_command}").run().unwrap();
 
-    if nvenc_flag {
+    if enable_nvenc {
         /*
            Describing Nvidia specific options --nvccflags:
            nvcc from CUDA toolkit version 11.0 or higher does not support compiling for 'compute_30' (default in ffmpeg)
@@ -275,7 +274,33 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool, deps_path: &Path) {
     cmd!(sh, "make install").run().unwrap();
 }
 
-fn get_android_openxr_loaders() {
+pub fn prepare_macos_deps() {}
+
+pub fn prepare_server_deps(
+    platform: Option<BuildPlatform>,
+    skip_admin_priv: bool,
+    enable_nvenc: bool,
+) {
+    match platform {
+        Some(BuildPlatform::Windows) => prepare_windows_deps(skip_admin_priv),
+        Some(BuildPlatform::Linux) => prepare_linux_deps(enable_nvenc),
+        Some(BuildPlatform::Macos) => prepare_macos_deps(),
+        Some(BuildPlatform::Android) => panic!("Android is not supported"),
+        None => {
+            if cfg!(windows) {
+                prepare_windows_deps(skip_admin_priv);
+            } else if cfg!(target_os = "linux") {
+                prepare_linux_deps(enable_nvenc);
+            } else if cfg!(target_os = "macos") {
+                prepare_macos_deps();
+            } else {
+                panic!("Unsupported platform");
+            }
+        }
+    }
+}
+
+fn get_android_openxr_loaders(selection: OpenXRLoadersSelection) {
     fn get_openxr_loader(name: &str, url: &str, source_dir: &str) {
         let sh = Shell::new().unwrap();
         let temp_dir = afs::build_dir().join("temp_download");
@@ -287,47 +312,59 @@ fn get_android_openxr_loaders() {
         command::download_and_extract_zip(url, &temp_dir).unwrap();
         fs::copy(
             temp_dir.join(source_dir).join("libopenxr_loader.so"),
-            destination_dir.join(format!("libopenxr_loader_{name}.so")),
+            destination_dir.join(format!("libopenxr_loader{name}.so")),
         )
         .unwrap();
         fs::remove_dir_all(&temp_dir).ok();
     }
 
     get_openxr_loader(
-        "generic",
+        "",
         &format!(
             "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/{}",
-            "release-1.0.27/openxr_loader_for_android-1.0.27.aar",
+            "release-1.0.34/openxr_loader_for_android-1.0.34.aar",
         ),
         "prefab/modules/openxr_loader/libs/android.arm64-v8a",
     );
 
-    get_openxr_loader(
-        "quest",
-        "https://securecdn.oculus.com/binaries/download/?id=7092833820755144", // version 60
-        "OpenXR/Libs/Android/arm64-v8a/Release",
-    );
+    if matches!(selection, OpenXRLoadersSelection::OnlyGeneric) {
+        return;
+    }
 
     get_openxr_loader(
-        "pico",
+        "_pico_old",
         "https://sdk.picovr.com/developer-platform/sdk/PICO_OpenXR_SDK_220.zip",
         "libs/android.arm64-v8a",
     );
 
+    if matches!(selection, OpenXRLoadersSelection::OnlyPico) {
+        return;
+    }
+
     get_openxr_loader(
-        "yvr",
-        "https://developer.yvrdream.com/yvrdoc/sdk/openxr/yvr_openxr_mobile_sdk_1.0.0.zip",
-        "yvr_openxr_mobile_sdk_1.0.0/OpenXR/Libs/Android/arm64-v8a",
+        "_quest1",
+        "https://securecdn.oculus.com/binaries/download/?id=7577210995650755", // Version 64
+        "OpenXR/Libs/Android/arm64-v8a/Release",
     );
 
     get_openxr_loader(
-        "lynx",
+        "_yvr",
+        "https://developer.yvrdream.com/yvrdoc/sdk/openxr/yvr_openxr_mobile_sdk_2.0.0.zip",
+        "yvr_openxr_mobile_sdk_2.0.0/OpenXR/Libs/Android/arm64-v8a",
+    );
+
+    get_openxr_loader(
+        "_lynx",
         "https://portal.lynx-r.com/downloads/download/16", // version 1.0.0
         "jni/arm64-v8a",
     );
 }
 
-pub fn build_android_deps(skip_admin_priv: bool) {
+pub fn build_android_deps(
+    skip_admin_priv: bool,
+    all_targets: bool,
+    openxr_loaders_selection: OpenXRLoadersSelection,
+) {
     let sh = Shell::new().unwrap();
 
     if cfg!(windows) && !skip_admin_priv {
@@ -337,18 +374,24 @@ pub fn build_android_deps(skip_admin_priv: bool) {
     cmd!(sh, "rustup target add aarch64-linux-android")
         .run()
         .unwrap();
-    cmd!(sh, "rustup target add armv7-linux-androideabi")
-        .run()
-        .unwrap();
-    cmd!(sh, "rustup target add x86_64-linux-android")
-        .run()
-        .unwrap();
-    cmd!(sh, "rustup target add i686-linux-android")
-        .run()
-        .unwrap();
-    cmd!(sh, "cargo install cargo-apk cargo-ndk cbindgen")
-        .run()
-        .unwrap();
+    if all_targets {
+        cmd!(sh, "rustup target add armv7-linux-androideabi")
+            .run()
+            .unwrap();
+        cmd!(sh, "rustup target add x86_64-linux-android")
+            .run()
+            .unwrap();
+        cmd!(sh, "rustup target add i686-linux-android")
+            .run()
+            .unwrap();
+    }
+    cmd!(sh, "cargo install cargo-ndk cbindgen").run().unwrap();
+    cmd!(
+        sh,
+        "cargo install --git https://github.com/zarik5/cargo-apk cargo-apk"
+    )
+    .run()
+    .unwrap();
 
-    get_android_openxr_loaders();
+    get_android_openxr_loaders(openxr_loaders_selection);
 }

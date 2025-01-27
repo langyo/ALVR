@@ -4,6 +4,150 @@ use serde::{Deserialize, Serialize};
 use settings_schema::SettingsSchema;
 use std::{error::Error, fmt::Display};
 
+pub const SERVER_IMPL_DBG_LABEL: &str = "SERVER IMPL";
+pub const CLIENT_IMPL_DBG_LABEL: &str = "CLIENT IMPL";
+pub const SERVER_CORE_DBG_LABEL: &str = "SERVER CORE";
+pub const CLIENT_CORE_DBG_LABEL: &str = "CLIENT CORE";
+pub const CONNECTION_DBG_LABEL: &str = "CONNECTION";
+pub const SOCKETS_DBG_LABEL: &str = "SOCKETS";
+pub const SERVER_GFX_DBG_LABEL: &str = "SERVER GFX";
+pub const CLIENT_GFX_DBG_LABEL: &str = "CLIENT GFX";
+pub const ENCODER_DBG_LABEL: &str = "ENCODER";
+pub const DECODER_DBG_LABEL: &str = "DECODER";
+
+#[macro_export]
+macro_rules! dbg_server_impl {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_IMPL_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_impl {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_IMPL_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_server_core {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_CORE_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_core {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_CORE_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_connection {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CONNECTION_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_sockets {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SOCKETS_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_server_gfx {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_GFX_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_gfx {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_GFX_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_encoder {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::ENCODER_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_decoder {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::DECODER_DBG_LABEL, $($args)*);
+    };
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct DebugGroupsConfig {
+    #[schema(flag = "steamvr-restart")]
+    pub server_impl: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_impl: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub server_core: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_core: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub connection: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub sockets: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub server_gfx: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_gfx: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub encoder: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub decoder: bool,
+}
+
+pub fn filter_debug_groups(target: &str, config: &DebugGroupsConfig) -> bool {
+    match target {
+        SERVER_IMPL_DBG_LABEL => config.server_impl,
+        CLIENT_IMPL_DBG_LABEL => config.client_impl,
+        SERVER_CORE_DBG_LABEL => config.server_core,
+        CLIENT_CORE_DBG_LABEL => config.client_core,
+        CONNECTION_DBG_LABEL => config.connection,
+        SOCKETS_DBG_LABEL => config.sockets,
+        SERVER_GFX_DBG_LABEL => config.server_gfx,
+        CLIENT_GFX_DBG_LABEL => config.client_gfx,
+        ENCODER_DBG_LABEL => config.encoder,
+        DECODER_DBG_LABEL => config.decoder,
+        _ => true,
+    }
+}
+
+pub fn is_enabled_debug_group(target: &str, config: &DebugGroupsConfig) -> bool {
+    (config.server_impl && target == SERVER_IMPL_DBG_LABEL)
+        || (config.client_impl && target == CLIENT_IMPL_DBG_LABEL)
+        || (config.server_core && target == SERVER_CORE_DBG_LABEL)
+        || (config.client_core && target == CLIENT_CORE_DBG_LABEL)
+        || (config.connection && target == CONNECTION_DBG_LABEL)
+        || (config.sockets && target == SOCKETS_DBG_LABEL)
+        || (config.server_gfx && target == SERVER_GFX_DBG_LABEL)
+        || (config.client_gfx && target == CLIENT_GFX_DBG_LABEL)
+        || (config.encoder && target == ENCODER_DBG_LABEL)
+        || (config.decoder && target == DECODER_DBG_LABEL)
+}
+
 #[derive(
     SettingsSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -47,15 +191,18 @@ pub fn set_panic_hook() {
             Backtrace::new()
         );
 
-        log::error!("{err_str}");
+        log::error!("ALVR panicked: {err_str}");
 
-        #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
-        std::thread::spawn(move || {
-            rfd::MessageDialog::new()
-                .set_title("ALVR panicked")
-                .set_description(&err_str)
-                .set_level(rfd::MessageLevel::Error)
-                .show();
+        #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
+        std::thread::spawn({
+            let panic_str = panic_info.to_string();
+            move || {
+                rfd::MessageDialog::new()
+                    .set_title("ALVR panicked")
+                    .set_description(&panic_str)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+            }
         });
     }))
 }
@@ -63,11 +210,11 @@ pub fn set_panic_hook() {
 pub fn show_w<W: Display + Send + 'static>(w: W) {
     log::warn!("{w}");
 
-    #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
+    #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
     std::thread::spawn(move || {
         rfd::MessageDialog::new()
             .set_title("ALVR warning")
-            .set_description(&w.to_string())
+            .set_description(w.to_string())
             .set_level(rfd::MessageLevel::Warning)
             .show()
     });
@@ -81,7 +228,7 @@ pub fn show_warn<T, E: Display + Send + 'static>(res: Result<T, E>) -> Option<T>
 fn show_e_block<E: Display>(e: E, blocking: bool) {
     log::error!("{e}");
 
-    #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
+    #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
     {
         // Store the last error shown in a message box. Do not open a new message box if the content
         // of the error has not changed

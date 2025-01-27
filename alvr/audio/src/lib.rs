@@ -1,6 +1,9 @@
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 #[cfg(windows)]
 pub use crate::windows::*;
 
@@ -11,9 +14,7 @@ use alvr_common::{
     parking_lot::Mutex,
     ConnectionError, ToAny,
 };
-use alvr_session::{
-    AudioBufferingConfig, CustomAudioDeviceConfig, LinuxAudioBackend, MicrophoneDevicesConfig,
-};
+use alvr_session::{AudioBufferingConfig, CustomAudioDeviceConfig, MicrophoneDevicesConfig};
 use alvr_sockets::{StreamReceiver, StreamSender};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -33,6 +34,7 @@ static VIRTUAL_MICROPHONE_PAIRS: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("VoiceMeeter Input", "VoiceMeeter Output"),
         ("VoiceMeeter Aux Input", "VoiceMeeter Aux Output"),
         ("VoiceMeeter VAIO3 Input", "VoiceMeeter VAIO3 Output"),
+        ("Virtual Cable 1", "Virtual Cable 2"),
     ]
     .into_iter()
     .collect()
@@ -87,17 +89,7 @@ pub struct AudioDevice {
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 impl AudioDevice {
-    pub fn new_output(
-        linux_backend: Option<LinuxAudioBackend>,
-        config: Option<&CustomAudioDeviceConfig>,
-    ) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        let host = match linux_backend {
-            Some(LinuxAudioBackend::Alsa) => cpal::host_from_id(cpal::HostId::Alsa).unwrap(),
-            Some(LinuxAudioBackend::Jack) => cpal::host_from_id(cpal::HostId::Jack).unwrap(),
-            None => cpal::default_host(),
-        };
-        #[cfg(not(target_os = "linux"))]
+    pub fn new_output(config: Option<&CustomAudioDeviceConfig>) -> Result<Self> {
         let host = cpal::default_host();
 
         let device = match config {
@@ -130,17 +122,7 @@ impl AudioDevice {
     }
 
     // returns (sink, source)
-    pub fn new_virtual_microphone_pair(
-        linux_backend: Option<LinuxAudioBackend>,
-        config: MicrophoneDevicesConfig,
-    ) -> Result<(Self, Self)> {
-        #[cfg(target_os = "linux")]
-        let host = match linux_backend {
-            Some(LinuxAudioBackend::Alsa) => cpal::host_from_id(cpal::HostId::Alsa).unwrap(),
-            Some(LinuxAudioBackend::Jack) => cpal::host_from_id(cpal::HostId::Jack).unwrap(),
-            None => cpal::default_host(),
-        };
-        #[cfg(not(target_os = "linux"))]
+    pub fn new_virtual_microphone_pair(config: MicrophoneDevicesConfig) -> Result<(Self, Self)> {
         let host = cpal::default_host();
 
         let (sink, source) = match config {
@@ -166,6 +148,9 @@ impl AudioDevice {
             }
             MicrophoneDevicesConfig::VoiceMeeterVaio3 => {
                 microphone_pair_from_sink_name(&host, "VoiceMeeter VAIO3 Input")?
+            }
+            MicrophoneDevicesConfig::VAC => {
+                microphone_pair_from_sink_name(&host, "Virtual Cable 1")?
             }
             MicrophoneDevicesConfig::Custom { sink, source } => (
                 device_from_custom_config(&host, &sink)?,
@@ -210,6 +195,113 @@ pub enum AudioRecordState {
     Err(Option<anyhow::Error>),
 }
 
+pub enum AudioChannel {
+    FrontLeft,
+    FrontRight,
+    Center,
+    SurroundLeft,
+    SurroundRight,
+    BackLeft,
+    BackRight,
+    Top,
+    HighFrontLeft,
+    HighFrontRight,
+    HighFrontCenter,
+    HighBackLeft,
+    HighBackRight,
+    LowFrequency,
+}
+
+macro_rules! channel_mix {
+    ( $x:expr ) => {
+        match $x {
+            AudioChannel::FrontLeft => [1.0, 0.0],
+            AudioChannel::FrontRight => [0.0, 1.0],
+            AudioChannel::Center => [0.707, 0.707],
+            AudioChannel::SurroundLeft => [0.707, 0.0],
+            AudioChannel::SurroundRight => [0.0, 0.707],
+            AudioChannel::BackLeft => [0.707, 0.0],
+            AudioChannel::BackRight => [0.0, 0.707],
+            AudioChannel::Top => [0.577, 0.577],
+            AudioChannel::HighFrontLeft => [0.707, 0.0],
+            AudioChannel::HighFrontRight => [0.0, 0.707],
+            AudioChannel::HighFrontCenter => [0.5, 0.5],
+            AudioChannel::HighBackLeft => [0.5, 0.0],
+            AudioChannel::HighBackRight => [0.0, 0.5],
+            _ => [0.0, 0.0],
+        }
+    };
+}
+
+fn downmix_channels(channels: &[AudioChannel], data: &[u8], out_channels: u16) -> Vec<u8> {
+    let mut left = 0.0;
+    let mut right = 0.0;
+
+    for i in 0..channels.len() {
+        let chan = &channels[i];
+        let [l, r] = channel_mix!(chan);
+        let val = i16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]).to_sample::<f32>();
+        left += val * l;
+        right += val * r;
+    }
+
+    if out_channels == 1 {
+        let bytes = ((left + right) / 2.0).to_sample::<i16>().to_ne_bytes();
+        vec![bytes[0], bytes[1]]
+    } else {
+        let left_bytes = left.to_sample::<i16>().to_ne_bytes();
+        let right_bytes = right.to_sample::<i16>().to_ne_bytes();
+        vec![left_bytes[0], left_bytes[1], right_bytes[0], right_bytes[1]]
+    }
+}
+
+fn downmix_audio(data: Vec<u8>, in_channels: u16, out_channels: u16) -> Vec<u8> {
+    if in_channels == out_channels {
+        data
+    } else if in_channels == 1 && out_channels == 2 {
+        data.chunks_exact(2)
+            .flat_map(|c| vec![c[0], c[1], c[0], c[1]])
+            .collect()
+    } else {
+        let channels = match in_channels {
+            2 => vec![AudioChannel::FrontLeft, AudioChannel::FrontRight],
+            3 => vec![
+                AudioChannel::FrontLeft,
+                AudioChannel::FrontRight,
+                AudioChannel::LowFrequency,
+            ],
+            4 => vec![
+                AudioChannel::FrontLeft,
+                AudioChannel::FrontRight,
+                AudioChannel::BackLeft,
+                AudioChannel::BackRight,
+            ],
+            6 => vec![
+                AudioChannel::FrontRight,
+                AudioChannel::Center,
+                AudioChannel::LowFrequency,
+                AudioChannel::SurroundLeft, // Sometimes actually BackLeft, has same level so it's okay
+                AudioChannel::SurroundRight, // Sometimes actually BackRight, has same level so it's okay
+            ],
+            8 => vec![
+                AudioChannel::FrontLeft,
+                AudioChannel::FrontRight,
+                AudioChannel::Center,
+                AudioChannel::LowFrequency,
+                AudioChannel::BackLeft,
+                AudioChannel::BackRight,
+                AudioChannel::SurroundLeft,
+                AudioChannel::SurroundRight,
+            ],
+            _ => unreachable!("Invalid input channel count"),
+        };
+
+        data.chunks_exact(in_channels as usize * 2)
+            .flat_map(|c| downmix_channels(&channels, c, out_channels))
+            .collect()
+    }
+}
+
 #[allow(unused_variables)]
 pub fn record_audio_blocking(
     is_running: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -224,11 +316,15 @@ pub fn record_audio_blocking(
         // On Windows, loopback devices are not recognized as input devices. Use output config.
         .or_else(|_| device.inner.default_output_config())?;
 
-    if config.channels() > 2 {
-        // todo: handle more than 2 channels
+    if config.channels() > 8 {
         bail!(
-            "Audio devices with more than 2 channels are not supported. {}",
+            "Audio devices with more than 8 channels are not supported. {}",
             "Please turn off surround audio."
+        );
+    } else if config.channels() == 5 || config.channels() == 7 {
+        bail!(
+            "Audio devices with {} channels are not supported.",
+            config.channels()
         );
     }
 
@@ -245,7 +341,7 @@ pub fn record_audio_blocking(
         config.sample_format(),
         {
             let state = Arc::clone(&state);
-            let is_running = is_running.clone();
+            let is_running = Arc::clone(&is_running);
             move |data, _| {
                 let data = if config.sample_format() == SampleFormat::F32 {
                     data.bytes()
@@ -261,17 +357,7 @@ pub fn record_audio_blocking(
                     data.bytes().to_vec()
                 };
 
-                let data = if config.channels() == 1 && channels_count == 2 {
-                    data.chunks_exact(2)
-                        .flat_map(|c| vec![c[0], c[1], c[0], c[1]])
-                        .collect()
-                } else if config.channels() == 2 && channels_count == 1 {
-                    data.chunks_exact(4)
-                        .flat_map(|c| vec![c[0], c[1]])
-                        .collect()
-                } else {
-                    data
-                };
+                let data = downmix_audio(data, config.channels(), channels_count);
 
                 if is_running() {
                     let mut buffer = sender.get_buffer(&()).unwrap();

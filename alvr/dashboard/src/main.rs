@@ -34,9 +34,9 @@ fn main() {
     logging_backend::init_logging(server_events_sender.clone());
 
     {
-        let mut data_manager = data_sources::get_local_data_source();
+        let mut session_manager = data_sources::get_local_session_source();
 
-        data_manager.clean_client_list();
+        session_manager.clean_client_list();
 
         #[cfg(target_os = "linux")]
         {
@@ -51,23 +51,25 @@ fn main() {
             .any(|adapter| adapter.get_info().vendor == 0x10de);
 
             if has_nvidia {
-                data_manager
+                session_manager
                     .session_mut()
                     .session_settings
+                    .extra
                     .patches
                     .linux_async_reprojection = false;
             }
         }
 
-        if data_manager.session().server_version != *ALVR_VERSION {
-            let mut session_ref = data_manager.session_mut();
+        if session_manager.session().server_version != *ALVR_VERSION {
+            let mut session_ref = session_manager.session_mut();
             session_ref.server_version = ALVR_VERSION.clone();
             session_ref.client_connections.clear();
-            session_ref.session_settings.open_setup_wizard = true;
+            session_ref.session_settings.extra.open_setup_wizard = true;
         }
 
-        if data_manager
+        if session_manager
             .settings()
+            .extra
             .steamvr_launcher
             .open_close_steamvr_with_dashboard
         {
@@ -90,6 +92,7 @@ fn main() {
         &format!("ALVR Dashboard (streamer v{})", *ALVR_VERSION),
         NativeOptions {
             viewport: ViewportBuilder::default()
+                .with_app_id("alvr.dashboard")
                 .with_inner_size((870.0, 600.0))
                 .with_icon(IconData {
                     rgba: image.rgba_data().to_owned(),
@@ -107,7 +110,7 @@ fn main() {
                     server_events_receiver,
                 );
 
-                Box::new(Dashboard::new(creation_context, data_source))
+                Ok(Box::new(Dashboard::new(creation_context, data_source)))
             })
         },
     )

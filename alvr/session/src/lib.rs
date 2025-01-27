@@ -50,6 +50,10 @@ pub struct OpenvrConfig {
     pub refresh_rate: u32,
     pub use_10bit_encoder: bool,
     pub use_full_range_encoding: bool,
+    pub encoding_gamma: f32,
+    pub enable_hdr: bool,
+    pub force_hdr_srgb_correction: bool,
+    pub clamp_hdr_extended_range: bool,
     pub enable_pre_analysis: bool,
     pub enable_vbaq: bool,
     pub enable_hmqb: bool,
@@ -101,10 +105,21 @@ pub struct OpenvrConfig {
     pub nvenc_enable_weighted_prediction: bool,
     pub capture_frame_dir: String,
     pub amd_bitrate_corruption_fix: bool,
+    pub use_separate_hand_trackers: bool,
 
     // these settings are not used on the C++ side, but we need them to correctly trigger a SteamVR
     // restart
     pub _controller_profile: i32,
+    pub _server_impl_debug: bool,
+    pub _client_impl_debug: bool,
+    pub _server_core_debug: bool,
+    pub _client_core_debug: bool,
+    pub _conncection_debug: bool,
+    pub _sockets_debug: bool,
+    pub _server_gfx_debug: bool,
+    pub _client_gfx_debug: bool,
+    pub _encoder_debug: bool,
+    pub _decoder_debug: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -114,7 +129,6 @@ pub struct ClientConnectionConfig {
     pub manual_ips: HashSet<IpAddr>,
     pub trusted: bool,
     pub connection_state: ConnectionState,
-    pub cabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -172,7 +186,7 @@ impl SessionConfig {
         }
 
         // Note: unwrap is safe because current session is expected to serialize correctly
-        let old_session_json = json::to_value(&self).unwrap();
+        let old_session_json = json::to_value(self.clone()).unwrap();
         let old_session_fields = old_session_json.as_object().unwrap();
 
         let maybe_session_settings_json =

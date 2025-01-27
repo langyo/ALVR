@@ -78,7 +78,7 @@ pub fn dashboard_fname() -> &'static str {
 }
 
 // Layout of the ALVR installation. All paths are absolute
-#[derive(Clone)]
+#[derive(Clone, Default, Debug)]
 pub struct Layout {
     // directory containing the dashboard executable
     pub executables_dir: PathBuf,
@@ -221,6 +221,22 @@ impl Layout {
         } else {
             self.log_dir.join("session_log.txt")
         }
+    }
+
+    pub fn connect_script(&self) -> PathBuf {
+        self.config_dir.join(if cfg!(windows) {
+            "on_connect.bat"
+        } else {
+            "on_connect.sh"
+        })
+    }
+
+    pub fn disconnect_script(&self) -> PathBuf {
+        self.config_dir.join(if cfg!(windows) {
+            "on_disconnect.bat"
+        } else {
+            "on_disconnect.sh"
+        })
     }
 
     pub fn crash_log(&self) -> PathBuf {
