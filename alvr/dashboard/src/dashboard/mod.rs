@@ -15,7 +15,9 @@ use alvr_events::EventType;
 use alvr_gui_common::theme;
 use alvr_packets::{ClientConnectionsAction, PathValuePair};
 use alvr_session::SessionConfig;
-use eframe::egui::{self, Align, CentralPanel, Frame, Layout, Margin, RichText, SidePanel, Stroke};
+use eframe::egui::{
+    self, Align, CentralPanel, Direction, Frame, Layout, Margin, RichText, SidePanel,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
@@ -89,7 +91,7 @@ impl Dashboard {
             tab_labels: [
                 (Tab::Devices, "🔌  Devices"),
                 (Tab::Statistics, "📈  Statistics"),
-                (Tab::Settings, "⚙  Settings"),
+                (Tab::Settings, "🔧  Settings"),
                 #[cfg(not(target_arch = "wasm32"))]
                 (Tab::Installation, "💾  Installation"),
                 (Tab::Logs, "📝  Logs"),
@@ -236,8 +238,7 @@ impl eframe::App for Dashboard {
                 .frame(
                     Frame::new()
                         .fill(theme::LIGHTER_BG)
-                        .inner_margin(Margin::same(7))
-                        .stroke(Stroke::new(1.0, theme::SEPARATOR_BG)),
+                        .inner_margin(Margin::same(7)),
                 )
                 .exact_width(160.0)
                 .show(context, |ui| {
@@ -268,22 +269,22 @@ impl eframe::App for Dashboard {
                             }
 
                             ui.horizontal(|ui| {
-                                ui.add_space(5.0);
+                                ui.add_space(4.0);
                                 ui.label(RichText::new("SteamVR:").size(13.0));
                                 ui.add_space(-10.0);
-                                if connected_to_server {
-                                    ui.label(
-                                        RichText::new("Connected")
-                                            .color(theme::OK_GREEN)
+                                ui.with_layout(
+                                    Layout::centered_and_justified(Direction::LeftToRight),
+                                    |ui| {
+                                        ui.label(
+                                            if connected_to_server {
+                                                RichText::new("Connected").color(theme::OK_GREEN)
+                                            } else {
+                                                RichText::new("Disconnected").color(theme::KO_RED)
+                                            }
                                             .size(13.0),
-                                    );
-                                } else {
-                                    ui.label(
-                                        RichText::new("Disconnected")
-                                            .color(theme::KO_RED)
-                                            .size(13.0),
-                                    );
-                                }
+                                        )
+                                    },
+                                );
                             })
                         },
                     )
